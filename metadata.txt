@@ -1,0 +1,10 @@
+[general]
+name=Singapore Biodiversity Accounting
+description=Automates calculation of biodiversity units using habitat area shapefiles. 
+about= tbd
+version=1.0
+qgisMinimumVersion=3.0
+author=Natalie Woo
+email=natalie@camphora.com.sg
+repository=URL to the code repository
+supportsQt6=True
