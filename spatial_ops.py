@@ -135,5 +135,5 @@ def execute_pipeline(baseline_shp, post_shp):
     union_with_fields = create_combined_fields(union_single) #add combined fields
     final_results = process_union(union_with_fields, lookups)
     
-    return final_results
+    return final_results, lookups
         

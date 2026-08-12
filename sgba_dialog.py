@@ -11,27 +11,6 @@ class SGBADialog(QDialog):
         
         layout = QVBoxLayout(self)
         
-        # -- Metadata Input --
-        form_layout = QFormLayout()
-        
-        self.proj_name_input = QLineEdit(self)
-        form_layout.addRow("Project Name:", self.proj_name_input)
-        
-        self.proj_stage_input = QLineEdit(self)
-        form_layout.addRow("Project Stage:", self.proj_stage_input)
-        
-        self.assessor_input = QLineEdit(self)
-        form_layout.addRow("Assessor:", self.assessor_input)
-        
-        self.reviewer_input = QLineEdit(self)
-        form_layout.addRow("Reviewer:", self.reviewer_input)
-        
-        self.date_input = QLineEdit(self)
-        self.date_input.setText(QDate.currentDate().toString("dd MMM yyyy"))
-        form_layout.addRow("Date of Assessment:", self.date_input)
-        
-        layout.addLayout(form_layout)
-        
         # -- Layer Dropdown ──
         layer_form = QFormLayout()
         
@@ -60,10 +39,10 @@ class SGBADialog(QDialog):
         
     def get_metadata(self):
         return{
-            "project_name": self.proj_name_input.text(),
-            "project_stage": self.proj_stage_input.text(),
-            "assessor": self.assessor_input.text(),
-            "reviewer": self.reviewer_input.text(),
-            "date": self.date_input.text()
+            "project_name": "",
+            "project_stage": "",
+            "assessor": "",
+            "reviewer": "",
+            "date": QDate.currentDate().toString("dd MMM yyyy")
         }
         

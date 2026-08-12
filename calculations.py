@@ -2,12 +2,16 @@
 Includes all calculations in the excel sheet and functions to execute them
 '''
 
+import datetime
+import logging
 import os
 import pandas as pd
-from qgis.core import QgsMessageLog, Qgis 
 
-PLUGIN_DIR = os.path.dirname(__file__)
-REFERENCE_XLSX = os.path.join(PLUGIN_DIR, "data", "SGBA_Reference.xlsx")
+log = logging.getLogger(__name__)
+
+_container_xlsx = '/data/SGBA_Reference.xlsx'
+_local_xlsx = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "SGBA_Reference.xlsx")
+REFERENCE_XLSX = _container_xlsx if os.path.exists(_container_xlsx) else _local_xlsx
 
 ### HELPER FUNCTIONS
 
@@ -20,8 +24,14 @@ def _safe_float(val):
 
 # Strips whitespace and converts to uppercase for safe dictionary matching.
 def _clean_str(val):
-    if pd.isna(val) or val is None:
+    if val is None:
         return ""
+
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
     
     # Convert to uppercase and strip outer whitespace
     cleaned = str(val).strip().upper()
@@ -33,8 +43,11 @@ def _clean_str(val):
     
 # Convert time to strings for display
 def _time_str(val):
-    if pd.isna(val):
-        return "Not Possible"
+    try:
+        if pd.isna(val):
+            return "Not Possible"
+    except (TypeError, ValueError):
+        pass
     s = str(val).strip()
     return "Not possible" if s in ("", "nan") else s
     
@@ -64,6 +77,9 @@ def load_lookups():
         if 'Ecosystem' in z1_df.columns:
             z1_df['Ecosystem'] = z1_df['Ecosystem'].ffill()
             
+        if 'Broad habitat' in z1_df.columns:
+            z1_df['Broad habitat'] = z1_df['Broad habitat'].ffill()
+            
         # Build category-to-score mapping from columns L-N
         category_scores = {}
         if 'CLASS' in z1_df.columns and 'VALUE' in z1_df.columns:
@@ -79,42 +95,38 @@ def load_lookups():
                 "LOW": 2.0, "VERY LOW": 1.0, "EXTREMELY LOW": 0.5, "NO VALUE": 0.0
             }
         lookups["cat_score_map"] = category_scores
+        
+        # Trading requirement column name
+        trading_col = 'Trading acceptable? Trading and Offset Requirement'
 
         for _, row in z1_df.iterrows():
             # Using .iloc or generic gets just in case headers have trailing spaces
             sub_hab = _clean_str(row.get('Sub habitat'))
             category = _clean_str(row.get('Category')) 
             
+            broad_raw = row.get('Broad habitat')
+            broad_habitat = str(broad_raw).strip() if pd.notna(broad_raw) else ""
+            
+            trading_raw = row.get(trading_col)
+            trading_requirement = str(trading_raw).strip() if pd.notna(trading_raw) else ""
+            
             if sub_hab:
                 lookups['z1'][sub_hab] = {
                     'ecosystem': _clean_str(row.get('Ecosystem')),
-                    'category': category,
-                    'score': category_scores.get(category, 0.0) 
+                    'broad_habitat': broad_habitat,
+                    'category': str(row.get('category', '')).strip(),
+                    'score': category_scores.get(category, 0.0),
+                    'trading_requirement': trading_requirement,
                 }
                 
         # FORCE A LOUD ERROR IF IT IS EMPTY
         if len(lookups['z1']) == 0:
             cols = list(z1_df.columns)
-            raise ValueError(f"Z1 is empty! Pandas found these exact columns in Excel: {cols}")
+            raise ValueError(f"Z1 is empty! Found these exact columns in Excel: {cols}")
             
     except Exception as e:
-        QgsMessageLog.logMessage(f"CRITICAL EXCEL ERROR: {str(e)}", 'SGBA', level=Qgis.Critical)
-        raise ValueError(f"Failed to read Excel file. Error: {str(e)}")
-
-        # 2. Map the habitats to their corresponding category score
-        for _, row in z1_df.iterrows():
-            sub_hab = _clean_str(row.get('Sub habitat'))
-            category = _clean_str(row.get('Category')) # e.g., "Very high"
-            
-            if sub_hab:
-                lookups['z1'][sub_hab] = {
-                    'ecosystem': _clean_str(row.get('Ecosystem')),
-                    'category': category,
-                    # This is the crucial fix: It matches the habitat's class to the distinctiveness score
-                    'score': category_scores.get(category, 0.0) 
-                }
-    except Exception as e:
-        print(f"Error loading Z1: {e}")
+        log.critical(f"CRITICAL EXCEL ERROR: {str(e)}")
+        raise ValueError(f"Failed to read Excel file. Error: {str(e)}")  
 
     # Z3: CONDITION VALUE
     try:
@@ -130,12 +142,12 @@ def load_lookups():
             z3[_clean_str(row[0])] = _safe_float(row[1]) # Store condition score
     
     #Z7: TARGET CREATION
-    df7 = pd.read_excel(REFERENCE_XLSX, sheet_name="Z7 TARGET CREATION", header=None, skiprows=2)
+    df7 = pd.read_excel(REFERENCE_XLSX, sheet_name="Z7 TARGET CREATION", header = None, skiprows = 2)
     z7 = {}
     
     for _, row in df7.iterrows():
         sub = _clean_str(row[1]) # Clean habitat name from column B
-        if not sub or sub == "SUB HABITAT": # Skip empty or header rows
+        if not sub or sub == "SUBHABITAT": # Skip empty or header rows
             continue
     
         z7[sub] = {
@@ -149,13 +161,13 @@ def load_lookups():
     lookups["z7"] = z7
     
     #Z8: TARGET ENH 
-    df8_mults = pd.read_excel(REFERENCE_XLSX, sheet_name="Z8 TARGET ENH", header=None, usecols="FH:FJ")
+    df8_mults = pd.read_excel(REFERENCE_XLSX, sheet_name="Z8 TARGET ENH", header = None, usecols = "FH:FJ")
     z8_data = {}
 
     for _, row in df8_mults.iterrows():
         sub = _clean_str(row.iloc[0])
 
-        if not sub or sub in ("SUB HABITAT", "START CONDITION", "#ERROR!", "NAN", "HABITAT"):
+        if not sub or sub in ("SUBHABITAT", "STARTCONDITION", "#ERROR!", "NAN", "HABITAT"):
             continue
 
         mult_val = row.iloc[1]
@@ -171,16 +183,33 @@ def load_lookups():
     # ENH POSSIBILITY
     enh_df = pd.read_excel(REFERENCE_XLSX, sheet_name="ENH POSSIBILITY")
     enh_possible = set()
+    enh_rows = [] 
 
     for _, row in enh_df.iterrows():
         if len(row) >= 2:
-            baseline = _clean_str(row.iloc[0])  
-            post_con = _clean_str(row.iloc[1])
+            baseline_raw = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
+            post_raw = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
+            baseline = _clean_str(baseline_raw)
+            post_con = _clean_str(post_raw)
 
             if baseline and post_con:
                 enh_possible.add((baseline, post_con))
+                
+                # Get baseline habitat name
+                baseline_hab_raw = baseline_raw.rsplit("/", 1)[0].strip() if "/" in baseline_raw else baseline_raw
+                
+                # Look up baseline ecosystem
+                eco_entry = lookups['z1'].get(_clean_str(baseline_hab_raw), {})
+                ecosystem = eco_entry.get("ecosystem", "TERRESTRIAL")
+                
+                enh_rows.append({
+                    "Ecosystem": ecosystem, 
+                        "Baseline Habitat / Condition": baseline_raw,
+                        "Post Habitat / Condition": post_raw,
+                })
     
     lookups["enh_possible"] = enh_possible
+    lookups["enh_rows"] = enh_rows
 
     return lookups
     
@@ -222,8 +251,7 @@ def calculate_creation_units(area_ha, post_hab, post_con, lookups):
     
     # Alert the user if the habitat spelling is missing from the Z7 Excel sheet
     if hab_clean and hab_clean not in lookups["z7"]:
-        from qgis.core import QgsMessageLog, Qgis
-        QgsMessageLog.logMessage(f"WARNING: '{hab_clean}' missing from Z7. Defaulting multiplier to 1.0", 'SGBA', level=Qgis.Warning)
+        log.warning(f"'{post_hab}' missing from Z7. Defaulting multiplier to 1.0")
 
     z7_entry = lookups["z7"].get(hab_clean, {}) 
     
@@ -251,12 +279,11 @@ def calculate_enhancement_units(area_ha, pre_hab, pre_con, post_hab, post_con, l
     
     # Alert the user if the habitat spelling is missing from the Z8 Excel sheet
     if hab_clean and hab_clean not in lookups["z8_data"]:
-        from qgis.core import QgsMessageLog, Qgis
-        QgsMessageLog.logMessage(f"WARNING: '{hab_clean}' missing from Z8. Defaulting multiplier to 1.0", 'SGBA', level=Qgis.Warning)
+        log.warning(f"'{post_hab}' missing from Z8. Defaulting multiplier to 1.0")
 
     z8_entry = lookups["z8_data"].get(hab_clean, {}) 
     
-    # FIX: Change defaults from 0.0 to 1.0
+    # Change defaults from 0.0 to 1.0
     mult = z8_entry.get("multiplier", 1.0) 
     diff = z8_entry.get("difficulty", "Standard")
 
@@ -288,18 +315,31 @@ def process_polygon_feature(feature_dict, lookups):
     # Determine status (RETAINED/ENHANCED/CREATED/LOSS)
     post_stat = determine_status(pre_hab, pre_con, post_hab, post_con, lookups)
     
-    # Get ecosystem type 
-    hab_for_eco = post_hab if post_hab else pre_hab  # Use post if exists, else pre
-    ecosystem = lookups["z1"].get(_clean_str(hab_for_eco), {}).get("ecosystem", "TERRESTRIAL")
+    # Z1 entries for pre and post habitats
+    pre_z1 = lookups["z1"].get(_clean_str(pre_hab), {})
+    post_z1 = lookups ["z1"].get(_clean_str(post_hab), {})
+    
+    pre_ecosystem = pre_z1.get("ecosystem", "TERRESTRIAL") if pre_hab else ""
+    post_ecosystem = post_z1.get("ecosystem", "TERRESTRIAL") if post_hab else ""
+    # For backward compatibility internally if ever needed
+    ecosystem = post_ecosystem if post_ecosystem else pre_ecosystem
     
     # Calculate baseline units (use pre_area)
-    base_units, base_dist, base_cond = calculate_baseline_units(
+    base_units, base_dist_score, base_cond_score = calculate_baseline_units(
         pre_area, pre_hab, pre_con, lookups
     )
+    base_dist_category = pre_z1.get("category", "")
 
-    # Initialize post-development values
+    # Post-development calculations
     post_units = 0.0
     time_to_target = "N/A"
+    mult = 1.0
+    difficulty = ""
+    
+    # Post distinctiveness/condition (defaults from Z1 lookup; overridden below for CREATED/ENHANCED)
+    post_dist_score = post_z1.get("score", 0.0)
+    post_dist_category = post_z1.get("category", "")
+    post_cond_score = lookups["z3"].get(_clean_str(post_con), 0.0)
     
     # Calculate post-development units based on status
     if post_stat == "RETAINED":  # Same habitat, same condition
@@ -310,21 +350,342 @@ def process_polygon_feature(feature_dict, lookups):
         post_units, _, _, _, time_to_target = calculate_creation_units(
             post_area, post_hab, post_con, lookups
         )
+        difficulty = lookups["z7"].get(_clean_str(post_hab), {}).get("difficulty", "")
     
     elif post_stat == "ENHANCED":  # Improved condition
             post_units, p_dist, p_cond, mult, time_to_target = calculate_enhancement_units(
                 post_area, pre_hab, pre_con, post_hab, post_con, lookups
             )
+            difficulty = lookups["z8_data"].get(_clean_str(post_hab), {}).get("difficulty", "")
     
     else:  # LOSS or unknown
         post_units = 0.0
         time_to_target = "N/A"
     
+    # ── Trading warnings ──────────────────────────────────────────────────────
+    pre_trading_req = pre_z1.get("trading_requirement", "")
+    post_trading_req = post_z1.get("trading_requirement", "")
+    trading_warning = ""
+
+    if pre_hab and post_stat not in ("RETAINED",):
+        post_is_unknown = bool(post_hab) and _clean_str(post_hab) not in lookups["z1"]
+        post_label = f" → '{post_hab}' (unrecognised habitat)" if post_is_unknown else (f" → '{post_hab}'" if post_hab else " → [LOSS]")
+
+        if "Irreplaceable" in pre_trading_req:
+            trading_warning = f"{pre_hab}{post_label}: {pre_trading_req}"
+
+        elif "Like-for-like" in pre_trading_req:
+            if _clean_str(pre_hab) != _clean_str(post_hab):
+                trading_warning = f"{pre_hab}{post_label}: {pre_trading_req}"
+
+        elif "Same broad habitat" in pre_trading_req:
+            pre_broad = pre_z1.get("broad_habitat", "")
+            post_broad = post_z1.get("broad_habitat", "")
+            pre_score = pre_z1.get("score", 0.0)
+            if post_broad != pre_broad and post_dist_score < pre_score:
+                trading_warning = f"{pre_hab}{post_label}: {pre_trading_req}"
+
+        elif "Replace habitat with low" in pre_trading_req:
+            # Requires post distinctiveness >= Low (score >= 2.0)
+            if post_dist_score < 2.0:
+                trading_warning = f"{pre_hab}{post_label}: {pre_trading_req}"
+    
     # Return results
     return {
-        "ecosystem": ecosystem,  # Terrestrial/Freshwater/Marine
-        "baseline_units": base_units,  # Baseline biodiversity units
-        "post_units": post_units,  # Post-development units
-        "net_change": post_units - base_units,  # Change in units
-        "time_to_target": time_to_target,  # Years to target (info only)
+        "pre_ecosystem": pre_ecosystem,
+        "post_ecosystem": post_ecosystem,
+        "ecosystem": ecosystem,
+        "status": post_stat,
+        # Baseline fields
+        "base_dist_score": round(base_dist_score, 4),
+        "base_cond_score": round(base_cond_score, 4),
+        "base_dist_category": base_dist_category,
+        "baseline_units": base_units,
+        # Post-development fields
+        "post_dist_score": round(post_dist_score, 4),
+        "post_cond_score": round(post_cond_score, 4),
+        "post_dist_category": post_dist_category,
+        "post_units": post_units,
+        "net_change": post_units - base_units,
+        "time_to_target": time_to_target,
+        "mult": mult,
+        "difficulty": difficulty,
+        # Trading info
+        "pre_trading_req": pre_trading_req,
+        "post_trading_req": post_trading_req,
+        "trading_warning": trading_warning,
     }
+
+
+### EXCEL EXPORT
+
+def export_to_excel(results, metadata, output_path, lookups=None, global_warnings=None):
+    if not results:
+        raise ValueError("No overlapping areas found to calculate")
+
+    global_warnings = global_warnings or []
+
+    # ── Ecosystem summary ─────────────────────────────────────────────────
+    summary = {
+        "TERRESTRIAL": {"base_units": 0.0, "post_units": 0.0},
+        "FRESHWATER":  {"base_units": 0.0, "post_units": 0.0},
+        "MARINE":      {"base_units": 0.0, "post_units": 0.0},
+    }
+
+    for row in results:
+        # Base units tracked under pre_ecosystem
+        pre_eco = row.get("pre_ecosystem", "").upper()
+        if pre_eco:
+            if pre_eco not in summary:
+                pre_eco = "TERRESTRIAL"
+            if row.get("pre_hab"):
+                summary[pre_eco]["base_units"] += row.get("baseline_units", 0.0)
+
+        # Post units tracked under post_ecosystem
+        post_eco = row.get("post_ecosystem", "").upper()
+        if post_eco:
+            if post_eco not in summary:
+                post_eco = "TERRESTRIAL"
+            if row.get("post_hab"):
+                summary[post_eco]["post_units"] += row.get("post_units", 0.0)
+
+    for eco in summary.values():
+        eco["net_change"] = eco["post_units"] - eco["base_units"]
+        eco["net_pct"] = (
+            eco["net_change"] / eco["base_units"] * 100
+            if eco["base_units"] > 0 else 0.0
+        )
+
+    total_base = sum(s["base_units"] for s in summary.values())
+    total_post = sum(s["post_units"] for s in summary.values())
+    total_net = total_post - total_base
+    total_pct = (total_net / total_base * 100) if total_base > 0 else 0.0
+
+    date_str = metadata.get("date") or datetime.date.today().isoformat()
+
+    # ── Metadata ──────────────────────────────────────────────────────────
+    meta_data = [
+        {"Field": "PROJECT NAME:", "Value": metadata.get("project_name", "")},
+        {"Field": "PROJECT STAGE:", "Value": metadata.get("project_stage", "")},
+        {"Field": "ASSESSOR:", "Value": metadata.get("assessor", "")},
+        {"Field": "REVIEWER:", "Value": metadata.get("reviewer", "")},
+        {"Field": "DATE OF ASSESSMENT:", "Value": date_str},
+    ]
+    df_meta = pd.DataFrame(meta_data)
+
+    # ── Ecosystem summary table ────────────────────────────────────────────
+    summary_data = []
+    for eco in ["TERRESTRIAL", "FRESHWATER", "MARINE"]:
+        summary_data.append({
+            "Ecosystem": eco,
+            "Baseline Units": round(summary[eco]["base_units"], 1),
+            "Post Development Units": round(summary[eco]["post_units"], 1),
+            "Net Change": round(summary[eco]["net_change"], 1),
+            "Net % Change": f"{summary[eco]['net_pct']:.1f}%",
+        })
+    summary_data.append({
+        "Ecosystem": "TOTAL",
+        "Baseline Units": round(total_base, 1),
+        "Post Development Units": round(total_post, 1),
+        "Net Change": round(total_net, 1),
+        "Net % Change": f"{total_pct:.1f}%",
+    })
+    df_summary = pd.DataFrame(summary_data)
+
+    # ── Warnings table ────────────────────────────────────────────────────
+    if global_warnings:
+        df_warnings = pd.DataFrame(global_warnings, columns=["Warning Type", "Details"])
+    else:
+        df_warnings = pd.DataFrame([{"Warning Type": "None", "Details": "No warnings."}])
+
+    # ── Baseline sheet ────────────────────────────────────────────────────
+    baseline_rows = []
+    for r in results:
+        if not r.get("pre_hab"):
+            continue
+        status = r.get("status", "")
+        area = r.get("pre_area", 0.0)
+        bu = r.get("baseline_units", 0.0)
+        is_lost = status in ("LOSS", "CREATED")
+        baseline_rows.append({
+            "Ecosystem": r.get("pre_ecosystem", ""),
+            "Baseline Habitat Type": r.get("pre_hab", ""),
+            "Area (ha)": area,
+            "Distinctiveness Category": r.get("base_dist_category", ""),
+            "Distinctiveness Score": r.get("base_dist_score", 0.0),
+            "Condition": r.get("pre_con", ""),
+            "Condition Score": r.get("base_cond_score", 0.0),
+            "Baseline Units": bu,
+            "Area Retained (ha)": area if status == "RETAINED" else 0.0,
+            "Baseline Units Retained": bu if status == "RETAINED" else 0.0,
+            "Area Enhanced (ha)": area if status == "ENHANCED" else 0.0,
+            "Baseline Units Enhanced": bu if status == "ENHANCED" else 0.0,
+            "Area Lost (ha)": area if is_lost else 0.0,
+            "Units Lost": bu if is_lost else 0.0,
+        })
+
+    col_order_base = ["Ecosystem", "Baseline Habitat Type", "Area (ha)",
+                      "Distinctiveness Category", "Distinctiveness Score", "Condition",
+                      "Condition Score", "Baseline Units",
+                      "Area Retained (ha)", "Baseline Units Retained",
+                      "Area Enhanced (ha)", "Baseline Units Enhanced",
+                      "Area Lost (ha)", "Units Lost"]
+
+    if baseline_rows:
+        df_baseline = pd.DataFrame(baseline_rows)
+        group_cols = ["Ecosystem", "Baseline Habitat Type", "Distinctiveness Category",
+                      "Distinctiveness Score", "Condition", "Condition Score"]
+        df_baseline = df_baseline.groupby(group_cols, dropna=False, as_index=False).sum()[col_order_base]
+        df_baseline["Notes"] = df_baseline["Area (ha)"].apply(
+            lambda x: f"<0.5 sqm (actual: {x:.6f} ha)" if round(x, 4) == 0.0 else ""
+        )
+        for c in ["Area (ha)", "Baseline Units", "Area Retained (ha)", "Baseline Units Retained",
+                  "Area Enhanced (ha)", "Baseline Units Enhanced", "Area Lost (ha)", "Units Lost"]:
+            df_baseline[c] = df_baseline[c].round(4)
+    else:
+        df_baseline = pd.DataFrame(columns=col_order_base + ["Notes"])
+
+    # ── Created sheet ──────────────────────────────────────────────────────
+    created_rows = []
+    for r in results:
+        if r.get("status") != "CREATED" or not r.get("post_hab"):
+            continue
+        created_rows.append({
+            "Ecosystem": r.get("post_ecosystem", ""),
+            "Pre-habitat Type": r.get("pre_hab", ""),
+            "Proposed Habitat": r.get("post_hab", ""),
+            "Area (ha)": r.get("post_area", 0.0),
+            "Distinctiveness Category": r.get("post_dist_category", ""),
+            "Distinctiveness Score": r.get("post_dist_score", 0.0),
+            "Condition": r.get("post_con", ""),
+            "Condition Score": r.get("post_cond_score", 0.0),
+            "Time to Target (Years)": r.get("time_to_target", ""),
+            "Difficulty of Creation": r.get("difficulty", ""),
+            "Difficulty Multiplier": r.get("mult", 1.0),
+            "Units Delivered": r.get("post_units", 0.0),
+            "Trading Warning": r.get("trading_warning", ""),
+        })
+
+    col_order_created = ["Ecosystem", "Pre-habitat Type", "Proposed Habitat", "Area (ha)",
+                         "Distinctiveness Category", "Distinctiveness Score", "Condition",
+                         "Condition Score", "Time to Target (Years)", "Difficulty of Creation",
+                         "Difficulty Multiplier", "Units Delivered", "Trading Warning"]
+
+    if created_rows:
+        df_created = pd.DataFrame(created_rows)
+        group_cols = ["Ecosystem", "Pre-habitat Type", "Proposed Habitat", "Distinctiveness Category",
+                      "Distinctiveness Score", "Condition", "Condition Score",
+                      "Time to Target (Years)", "Difficulty of Creation", "Difficulty Multiplier", "Trading Warning"]
+        df_created = df_created.groupby(group_cols, dropna=False, as_index=False).sum()[col_order_created]
+        df_created["Notes"] = df_created["Area (ha)"].apply(
+            lambda x: f"<0.5 sqm (actual: {x:.6f} ha)" if round(x, 4) == 0.0 else ""
+        )
+        for c in ["Area (ha)", "Units Delivered"]:
+            df_created[c] = df_created[c].round(4)
+    else:
+        df_created = pd.DataFrame(columns=col_order_created + ["Notes"])
+
+    # ── Enhanced sheet ─────────────────────────────────────────────────────
+    enhanced_rows = []
+    for r in results:
+        if r.get("status") != "ENHANCED":
+            continue
+        base_dist = r.get("base_dist_score", 0.0)
+        base_cond = r.get("base_cond_score", 0.0)
+        post_dist = r.get("post_dist_score", 0.0)
+        post_cond = r.get("post_cond_score", 0.0)
+        enhanced_rows.append({
+            "Ecosystem": r.get("post_ecosystem", ""),
+            "Baseline Habitat": r.get("pre_hab", ""),
+            "Baseline Distinctiveness Score": base_dist,
+            "Baseline Condition Score": base_cond,
+            "Proposed Habitat": r.get("post_hab", ""),
+            "Change in Distinctiveness Score": round(post_dist - base_dist, 4),
+            "Change in Condition Score": round(post_cond - base_cond, 4),
+            "Area (ha)": r.get("post_area", 0.0),
+            "Post Distinctiveness Category": r.get("post_dist_category", ""),
+            "Post Distinctiveness Score": post_dist,
+            "Post Condition": r.get("post_con", ""),
+            "Post Condition Score": post_cond,
+            "Time to Target (Years)": r.get("time_to_target", ""),
+            "Difficulty Multiplier": r.get("mult", 1.0),
+            "Units Delivered": r.get("post_units", 0.0),
+            "Trading Warning": r.get("trading_warning", ""),
+        })
+        
+    col_order_enhanced = ["Ecosystem", "Baseline Habitat", "Baseline Distinctiveness Score",
+                          "Baseline Condition Score", "Proposed Habitat",
+                          "Change in Distinctiveness Score", "Change in Condition Score",
+                          "Area (ha)", "Post Distinctiveness Category", "Post Distinctiveness Score",
+                          "Post Condition", "Post Condition Score", "Time to Target (Years)",
+                          "Difficulty Multiplier", "Units Delivered", "Trading Warning"]
+
+    if enhanced_rows:
+        df_enhanced = pd.DataFrame(enhanced_rows)
+        group_cols = ["Ecosystem", "Baseline Habitat", "Baseline Distinctiveness Score",
+                      "Baseline Condition Score", "Proposed Habitat",
+                      "Change in Distinctiveness Score", "Change in Condition Score",
+                      "Post Distinctiveness Category", "Post Distinctiveness Score",
+                      "Post Condition", "Post Condition Score", "Time to Target (Years)",
+                      "Difficulty Multiplier", "Trading Warning"]
+        df_enhanced = df_enhanced.groupby(group_cols, dropna=False, as_index=False).sum()[col_order_enhanced]
+        df_enhanced["Notes"] = df_enhanced["Area (ha)"].apply(
+            lambda x: f"<0.5 sqm (actual: {x:.6f} ha)" if round(x, 4) == 0.0 else ""
+        )
+        for c in ["Area (ha)", "Units Delivered"]:
+            df_enhanced[c] = df_enhanced[c].round(4)
+    else:
+        df_enhanced = pd.DataFrame(columns=col_order_enhanced + ["Notes"])
+
+    # ── Acceptable Conversions sheet ───────────────────────────────────────
+    # All valid enhancement pathways from ENH POSSIBILITY, labelled by ecosystem.
+    if lookups and lookups.get("enh_rows"):
+        df_conversions = pd.DataFrame(lookups["enh_rows"])
+        eco_order = {"MARINE": 0, "FRESHWATER": 1, "TERRESTRIAL": 2}
+        df_conversions["_sort"] = df_conversions["Ecosystem"].map(
+            lambda e: eco_order.get(e.upper(), 3)
+        )
+        df_conversions = (df_conversions.sort_values("_sort")
+                          .drop(columns=["_sort"])
+                          .reset_index(drop=True))
+        df_conversions.index = df_conversions.index + 1
+    else:
+        df_conversions = pd.DataFrame(
+            columns=["Ecosystem", "Baseline Habitat / Condition", "Post Habitat / Condition"]
+        )
+
+    # ── Write Excel ───────────────────────────────────────────────────────
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+
+        # Summary sheet: metadata, unit summary, then warnings
+        df_meta.to_excel(writer, sheet_name='Summary', index=False, header=False, startrow=0)
+        next_row = len(df_meta) + 2
+        df_summary.to_excel(writer, sheet_name='Summary', index=False, startrow=next_row)
+        next_row += len(df_summary) + 3
+
+        # Warnings header label
+        pd.DataFrame([["WARNINGS"]], columns=[""]).to_excel(
+            writer, sheet_name='Summary', index=False, header=False, startrow=next_row
+        )
+        df_warnings.to_excel(writer, sheet_name='Summary', index=False, startrow=next_row + 1)
+
+        # Habitat detail sheets (terrestrial, freshwater and marine grouped together)
+        df_baseline.to_excel(writer, sheet_name='Baseline', index=False)
+        df_created.to_excel(writer, sheet_name='Created', index=False)
+        df_enhanced.to_excel(writer, sheet_name='Enhanced', index=False)
+
+        # Acceptable habitat conversions reference sheet
+        df_conversions.to_excel(writer, sheet_name='Acceptable Conversions',
+                                index=True, index_label="#")
+
+        # Auto-fit column widths across all sheets
+        for sheet in writer.sheets.values():
+            for col_cells in sheet.columns:
+                max_len = 0
+                col_letter = col_cells[0].column_letter
+                for cell in col_cells:
+                    if cell.value is not None:
+                        max_len = max(max_len, len(str(cell.value)))
+                sheet.column_dimensions[col_letter].width = min(max_len + 4, 60)
+
+    log.info(f"Excel report saved to: {output_path}")
